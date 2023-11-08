@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  proxy:
+    container_name: proxy
+    image: proxy:latest
+    networks:
+      - default_network
+    build:
+      context: .
+    ports:
+      - 8080:8080/tcp
+
+networks:
+  default_network:
