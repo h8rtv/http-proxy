@@ -9,36 +9,13 @@ import (
 	"log/syslog"
 	"net"
 	"net/http"
-	"strings"
 )
 
-const PORT int16 = 8080
-const BAD_STR string = "monitoramento"
-
-func readHttp(reader *bufio.Reader, isRequest bool) ([]byte, error) {
-	var httpResponseBuilder strings.Builder
-
-	counter := 0
-
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-
-		httpResponseBuilder.WriteString(line)
-
-		if line == "\r\n" {
-			counter++
-
-			if isRequest && counter > 0 || counter >  {
-				break
-			}
-		}
-	}
-
-	return []byte(httpResponseBuilder.String()), nil
-}
+const (
+	PORT    int16  = 8080
+	host           = "127.0.0.1"
+	BAD_STR string = "monitoramento"
+)
 
 func blockAccess(remoteAddr string) []byte {
 
@@ -80,19 +57,16 @@ func connectToServer(host string, clientConn net.Conn) (net.Conn, error) {
 }
 
 func proxy(buffer []byte, clientConn net.Conn, serverConn net.Conn) (int, error) {
-	reader := bufio.NewReader(serverConn)
-
 	n, err := serverConn.Write(buffer)
 	if err != nil {
 		return n, err
 	}
 
-	serverBuffer, err := readHttp(reader, false)
+	serverBuffer := make([]byte, 4096)
+	n, err = serverConn.Read(serverBuffer)
 	if err != nil {
 		return n, err
 	}
-
-	fmt.Println(string(serverBuffer))
 
 	n, err = clientConn.Write(serverBuffer)
 	if err != nil {
@@ -110,9 +84,9 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
 	for {
-		buffer, err := readHttp(reader, true)
+		buffer := make([]byte, 4096)
+		n, err := conn.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
 				msg := fmt.Sprintf("Client disconnected. %s", remoteAddr)
@@ -127,14 +101,14 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 			break
 		}
 
-		if bytes.Contains(buffer, []byte(BAD_STR)) {
+		if bytes.Contains(buffer[:n], []byte(BAD_STR)) {
 			msg := fmt.Sprintf("Unauthorized access for IP %s", remoteAddr)
 			fmt.Println(msg)
 			sysLog.Info(msg)
 			conn.Write(blockAccess(remoteAddr))
 			break
 		} else {
-			host, err := getHost(buffer)
+			host, err := getHost(buffer[:n])
 			if err != nil {
 				msg := fmt.Sprintf("Failed to extract host from request %s", err)
 				sysLog.Err(msg)
@@ -151,7 +125,7 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 			}
 			defer serverConn.Close()
 
-			_, err = proxy(buffer, conn, serverConn)
+			_, err = proxy(buffer[:n], conn, serverConn)
 			if err != nil {
 				sysLog.Err(fmt.Sprintf("Failed to proxy the request: %s", err))
 				fmt.Println(err)
