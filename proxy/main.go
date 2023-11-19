@@ -13,7 +13,7 @@ import (
 
 const (
 	PORT    int16  = 8080
-	host           = "127.0.0.1"
+	host    string = "127.0.0.1"
 	BAD_STR string = "monitoramento"
 )
 
@@ -42,12 +42,11 @@ func getHost(buffer []byte) (string, error) {
 		return "", err
 	}
 
-	targetServer := req.Host
+	targetServer := req.URL.Hostname()
 	return fmt.Sprintf("%s:80", targetServer), nil
 }
 
-func connectToServer(host string, clientConn net.Conn) (net.Conn, error) {
-
+func connectToServer(host string) (net.Conn, error) {
 	serverConn, err := net.Dial("tcp", host)
 	if err != nil {
 		return nil, err
@@ -56,24 +55,30 @@ func connectToServer(host string, clientConn net.Conn) (net.Conn, error) {
 	return serverConn, nil
 }
 
-func proxy(buffer []byte, clientConn net.Conn, serverConn net.Conn) (int, error) {
+func proxy(buffer []byte, clientConn net.Conn, host string) (int, error) {
+	serverConn, err := connectToServer(host)
+	if err != nil {
+		return 0, err
+	}
+	defer serverConn.Close()
+
 	n, err := serverConn.Write(buffer)
 	if err != nil {
 		return n, err
 	}
 
 	serverBuffer := make([]byte, 4096)
-	n, err = serverConn.Read(serverBuffer)
-	if err != nil {
-		return n, err
-	}
+	for {
+		n, err = serverConn.Read(serverBuffer)
+		if err != nil {
+			return n, err
+		}
 
-	n, err = clientConn.Write(serverBuffer)
-	if err != nil {
-		return n, err
+		n, err = clientConn.Write(serverBuffer)
+		if err != nil {
+			return n, err
+		}
 	}
-
-	return n, nil
 }
 
 func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
@@ -89,48 +94,50 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 		n, err := conn.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
-				msg := fmt.Sprintf("Client disconnected. %s", remoteAddr)
-				sysLog.Err(msg)
+				msg := fmt.Sprintf("Client disconnected: %s", remoteAddr)
+				sysLog.Info(msg)
 				fmt.Println(msg)
 				break
 			}
 
-			msg := fmt.Sprintf("Failed to read data. %s", err)
+			msg := fmt.Sprintf("Failed to read data: %s, %s", remoteAddr, err)
+			sysLog.Err(msg)
+			fmt.Println(msg)
+			break
+		}
+
+		host, err := getHost(buffer[:n])
+		if err != nil {
+			msg := fmt.Sprintf("Failed to extract host from request: %s, %s", remoteAddr, err)
 			sysLog.Err(msg)
 			fmt.Println(msg)
 			break
 		}
 
 		if bytes.Contains(buffer[:n], []byte(BAD_STR)) {
-			msg := fmt.Sprintf("Unauthorized access for IP %s", remoteAddr)
+			msg := fmt.Sprintf("Unauthorized access from IP: %s to %s", remoteAddr, host)
 			fmt.Println(msg)
 			sysLog.Info(msg)
 			conn.Write(blockAccess(remoteAddr))
 			break
 		} else {
-			host, err := getHost(buffer[:n])
-			if err != nil {
-				msg := fmt.Sprintf("Failed to extract host from request %s", err)
-				sysLog.Err(msg)
+			go func() {
+				msg := fmt.Sprintf("Proxying from %s to %s", remoteAddr, host)
+				sysLog.Info(msg)
 				fmt.Println(msg)
-				break
-			}
 
-			serverConn, err := connectToServer(host, conn)
-			if err != nil {
-				msg := fmt.Sprintf("Failed to connect to host %s", err)
-				sysLog.Err(msg)
-				fmt.Println(msg)
-				break
-			}
-			defer serverConn.Close()
-
-			_, err = proxy(buffer[:n], conn, serverConn)
-			if err != nil {
-				sysLog.Err(fmt.Sprintf("Failed to proxy the request: %s", err))
-				fmt.Println(err)
-				break
-			}
+				_, err = proxy(buffer[:n], conn, host)
+				if err != nil {
+					if err == io.EOF {
+						msg := fmt.Sprintf("Server disconnected: %s", host)
+						sysLog.Info(msg)
+						fmt.Println(msg)
+					} else {
+						sysLog.Err(fmt.Sprintf("Failed to proxy the request: %s", err))
+						fmt.Println(err)
+					}
+				}
+			}()
 		}
 	}
 
@@ -140,7 +147,7 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 }
 
 func main() {
-	sysLog, err := syslog.New(syslog.LOG_LOCAL7|syslog.LOG_DEBUG, "Proxy")
+	sysLog, err := syslog.Dial("udp", "syslogserver:514", syslog.LOG_INFO|syslog.LOG_DAEMON, "proxy")
 	if err != nil {
 		log.Fatal("Error connecting to syslog")
 	}

@@ -1,5 +1,17 @@
 version: "3.8"
 services:
+  syslogserver:
+    image: pbertera/syslogserver
+    container_name: syslogserver
+    environment:
+      - SYSLOG_USERNAME=admin
+      - SYSLOG_PASSWORD=123456
+    ports:
+      - 5514:514/udp
+      - 8081:80/tcp
+    restart: unless-stopped
+    networks:
+      - default_network
   proxy:
     container_name: proxy
     image: proxy:latest
