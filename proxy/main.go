@@ -4,14 +4,103 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"log/syslog"
 	"net"
 	"net/http"
+	"strings"
 )
 
 const PORT int16 = 8080
 const BAD_STR string = "monitoramento"
+
+func readHttp(reader *bufio.Reader, isRequest bool) ([]byte, error) {
+	var httpResponseBuilder strings.Builder
+
+	counter := 0
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+
+		httpResponseBuilder.WriteString(line)
+
+		if line == "\r\n" {
+			counter++
+
+			if isRequest && counter > 0 || counter >  {
+				break
+			}
+		}
+	}
+
+	return []byte(httpResponseBuilder.String()), nil
+}
+
+func blockAccess(remoteAddr string) []byte {
+
+	res := "HTTP/1.1 200 OK\n" +
+		"Server: Microsoft-IIS/4.0" +
+		"Date: Mon, 3 Jan 2016 17:13:34 GMT\n" +
+		"Content-Type: text/html; charset=utf-8\n" +
+		"Last-Modified: Mon, 11 Jan 2016 17:24:42 GMT\n" +
+		"Content-Length: 112\n\n" +
+		"<html>\n" +
+		"<head>\n" +
+		"<title>Exemplo de resposta HTTP</title>\n" +
+		"</head>\n" +
+		"<body>Acesso não autorizado!</body>\n" +
+		"</html>\n\n"
+
+	return []byte(res)
+}
+
+func getHost(buffer []byte) (string, error) {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buffer)))
+
+	if err != nil {
+		return "", err
+	}
+
+	targetServer := req.Host
+	return fmt.Sprintf("%s:80", targetServer), nil
+}
+
+func connectToServer(host string, clientConn net.Conn) (net.Conn, error) {
+
+	serverConn, err := net.Dial("tcp", host)
+	if err != nil {
+		return nil, err
+	}
+
+	return serverConn, nil
+}
+
+func proxy(buffer []byte, clientConn net.Conn, serverConn net.Conn) (int, error) {
+	reader := bufio.NewReader(serverConn)
+
+	n, err := serverConn.Write(buffer)
+	if err != nil {
+		return n, err
+	}
+
+	serverBuffer, err := readHttp(reader, false)
+	if err != nil {
+		return n, err
+	}
+
+	fmt.Println(string(serverBuffer))
+
+	n, err = clientConn.Write(serverBuffer)
+	if err != nil {
+		return n, err
+	}
+
+	return n, nil
+}
 
 func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 	remoteAddr := conn.RemoteAddr().String()
@@ -21,81 +110,59 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 
 	defer conn.Close()
 
-	buffer := make([]byte, 1024)
-
-	n, err := conn.Read(buffer)
-	if err != nil {
-		msg := fmt.Sprintf("Failed to read data. %s", err)
-		sysLog.Err(msg)
-		fmt.Println(msg)
-		return
-	}
-	fmt.Printf("Received: %s\n", buffer[:n])
-
-	if bytes.Contains(buffer[:n], []byte(BAD_STR)) {
-		msg := fmt.Sprintf("Unauthorized access for ip %s", remoteAddr)
-		fmt.Printf(msg)
-		sysLog.Info(msg)
-
-		res := "HTTP/1.1 200 OK\n" +
-			"Server: Microsoft-IIS/4.0" +
-			"Date: Mon, 3 Jan 2016 17:13:34 GMT\n" +
-			"Content-Type: text/html; charset=utf-8\n" +
-			"Last-Modified: Mon, 11 Jan 2016 17:24:42 GMT\n" +
-			"Content-Length: 112\n\n" +
-			"<html>\n" +
-			"<head>\n" +
-			"<title>Exemplo de resposta HTTP</title>\n" +
-			"</head>\n" +
-			"<body>Acesso não autorizado!</body>\n" +
-			"</html>\n\n"
-		conn.Write([]byte(res))
-	} else {
-		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buffer[:n])))
+	reader := bufio.NewReader(conn)
+	for {
+		buffer, err := readHttp(reader, true)
 		if err != nil {
-			msg := fmt.Sprintf("Failed to parse HTTP request: %s", err)
+			if err == io.EOF {
+				msg := fmt.Sprintf("Client disconnected. %s", remoteAddr)
+				sysLog.Err(msg)
+				fmt.Println(msg)
+				break
+			}
+
+			msg := fmt.Sprintf("Failed to read data. %s", err)
 			sysLog.Err(msg)
 			fmt.Println(msg)
-			return
+			break
 		}
 
-		targetServer := req.Host
+		if bytes.Contains(buffer, []byte(BAD_STR)) {
+			msg := fmt.Sprintf("Unauthorized access for IP %s", remoteAddr)
+			fmt.Println(msg)
+			sysLog.Info(msg)
+			conn.Write(blockAccess(remoteAddr))
+			break
+		} else {
+			host, err := getHost(buffer)
+			if err != nil {
+				msg := fmt.Sprintf("Failed to extract host from request %s", err)
+				sysLog.Err(msg)
+				fmt.Println(msg)
+				break
+			}
 
-		// Forward the data to the server
-		serverConn, err := net.Dial("tcp", fmt.Sprintf("%s:80", targetServer))
-		if err != nil {
-			sysLog.Err(fmt.Sprintf("Failed to connect to server: %s", err))
-			fmt.Println(err)
-			return
-		}
+			serverConn, err := connectToServer(host, conn)
+			if err != nil {
+				msg := fmt.Sprintf("Failed to connect to host %s", err)
+				sysLog.Err(msg)
+				fmt.Println(msg)
+				break
+			}
+			defer serverConn.Close()
 
-		defer serverConn.Close()
-
-		// Write data to the server
-		_, err = serverConn.Write(buffer[:n])
-		if err != nil {
-			sysLog.Err(fmt.Sprintf("Failed to write to server: %s", err))
-			fmt.Println(err)
-			return
-		}
-
-		// Read the server's response
-		serverBuffer := make([]byte, 4096)
-		serverDataLen, err := serverConn.Read(serverBuffer)
-		if err != nil {
-			sysLog.Err(fmt.Sprintf("Failed to read from server: %s", err))
-			fmt.Println(err)
-			return
-		}
-
-		// Forward the server's response back to the client
-		_, err = conn.Write(serverBuffer[:serverDataLen])
-		if err != nil {
-			sysLog.Err(fmt.Sprintf("Failed to write back to client: %s", err))
-			fmt.Println(err)
-			return
+			_, err = proxy(buffer, conn, serverConn)
+			if err != nil {
+				sysLog.Err(fmt.Sprintf("Failed to proxy the request: %s", err))
+				fmt.Println(err)
+				break
+			}
 		}
 	}
+
+	msg = fmt.Sprintf("Closing connection with: %s", remoteAddr)
+	sysLog.Info(msg)
+	fmt.Println(msg)
 }
 
 func main() {
