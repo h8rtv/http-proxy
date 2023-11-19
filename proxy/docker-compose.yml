@@ -11,16 +11,7 @@ services:
       - 8081:80/tcp
     restart: unless-stopped
     networks:
-      - default_network
-  proxy:
-    container_name: proxy
-    image: proxy:latest
-    networks:
-      - default_network
-    build:
-      context: .
-    ports:
-      - 8080:8080/tcp
+      - net
 
 networks:
-  default_network:
+  net:
