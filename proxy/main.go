@@ -73,10 +73,11 @@ func proxy(buffer []byte, clientConn net.Conn, host string) (int, error) {
 		if err != nil {
 			return n, err
 		}
-
-		n, err = clientConn.Write(serverBuffer)
-		if err != nil {
-			return n, err
+		if n > 0 {
+			n, err = clientConn.Write(serverBuffer[:n])
+			if err != nil {
+				return n, err
+			}
 		}
 	}
 }
@@ -89,8 +90,8 @@ func handleConnection(conn net.Conn, sysLog *syslog.Writer) {
 
 	defer conn.Close()
 
+	buffer := make([]byte, 4096)
 	for {
-		buffer := make([]byte, 4096)
 		n, err := conn.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
