@@ -14,7 +14,7 @@ import (
 const (
 	PORT    int16  = 8080
 	host    string = "127.0.0.1"
-	BAD_STR string = "monitoramento"
+	BAD_STR string = "monitorando"
 )
 
 func blockAccess(remoteAddr string) []byte {
