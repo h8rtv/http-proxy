@@ -14,7 +14,7 @@ import (
 const (
 	PORT    int16  = 8080
 	host    string = "127.0.0.1"
-	BAD_STR string = "monitorando"
+	BAD_STR string = "monitoring"
 )
 
 func blockAccess(remoteAddr string) []byte {
@@ -27,9 +27,9 @@ func blockAccess(remoteAddr string) []byte {
 		"Content-Length: 112\n\n" +
 		"<html>\n" +
 		"<head>\n" +
-		"<title>Exemplo de resposta HTTP</title>\n" +
+		"<title>Access Denied</title>\n" +
 		"</head>\n" +
-		"<body>Acesso não autorizado!</body>\n" +
+		"<body>Unauthorized Access!</body>\n" +
 		"</html>\n\n"
 
 	return []byte(res)
